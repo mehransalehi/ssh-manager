@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, session } = require("electron");
 const path = require("path");
 const { initDB, getDB } = require("./db");
 const { testServer } = require("./testManager");
@@ -16,6 +16,7 @@ let tray;
 let speedMonitorInterval;
 let loadBalanceInterval;
 let loadBalanceInProgress = false;
+let testAllCancelRequested = false;
 
 function countryCodeToFlag(code) {
   if (!code || code.length !== 2) return null;
@@ -203,6 +204,29 @@ function createTray() {
   tray.on("double-click", () => mainWindow.show());
 }
 
+async function applySystemProxyIfEnabled(serverId = null) {
+  const enabled = getSetting("system_proxy_enabled", "0") === "1";
+  if (!enabled) {
+    await session.defaultSession.setProxy({ mode: "direct" });
+    return;
+  }
+
+  const db = getDB();
+  const connected = serverId
+    ? db.prepare("SELECT socks_port FROM servers WHERE id=? AND status='CONNECTED'").get(serverId)
+    : db.prepare("SELECT socks_port FROM servers WHERE status='CONNECTED' ORDER BY id DESC LIMIT 1").get();
+
+  if (!connected?.socks_port) {
+    await session.defaultSession.setProxy({ mode: "direct" });
+    return;
+  }
+
+  await session.defaultSession.setProxy({
+    proxyRules: `socks5://127.0.0.1:${connected.socks_port}`,
+    proxyBypassRules: "<-loopback>",
+  });
+}
+
 function applySpeedSortRanks() {
   const db = getDB();
   const ranked = db
@@ -258,6 +282,7 @@ async function runPinnedLoadBalance() {
 
     const activeIds = getActiveConnectionIds();
     for (const activeId of activeIds) disconnectSSH(activeId);
+    await applySystemProxyIfEnabled();
 
     const connectResult = await connectSSH(best.id);
     if (connectResult.success) {
@@ -265,6 +290,7 @@ async function runPinnedLoadBalance() {
       await testSocksLatency(best.id);
       sendNotification("Load balancing", `Connected to best pinned server #${best.id}`);
     }
+    await applySystemProxyIfEnabled(best.id);
 
     applySpeedSortRanks();
     updateTrayForConnectedServer();
@@ -305,12 +331,14 @@ app.whenReady().then(() => {
   setSetting("speed_check_interval_min", getSetting("speed_check_interval_min", "5"));
   setSetting("load_balance_enabled", getSetting("load_balance_enabled", "0"));
   setSetting("load_balance_interval_min", getSetting("load_balance_interval_min", "5"));
+  setSetting("system_proxy_enabled", getSetting("system_proxy_enabled", "0"));
   setupIPC();
   buildAppMenu();
   createWindow();
   createTray();
   setupSpeedMonitor();
   setupLoadBalanceMonitor();
+  applySystemProxyIfEnabled();
   updateTrayForConnectedServer();
 
   app.on("activate", () => {
@@ -355,6 +383,7 @@ function setupIPC() {
       speed_check_interval_min: Number(getSetting("speed_check_interval_min", "5")) || 5,
       load_balance_enabled: getSetting("load_balance_enabled", "0") === "1",
       load_balance_interval_min: Number(getSetting("load_balance_interval_min", "5")) || 5,
+      system_proxy_enabled: getSetting("system_proxy_enabled", "0") === "1",
     };
   });
 
@@ -362,13 +391,16 @@ function setupIPC() {
     const speedCheck = Math.max(1, Number(payload.speed_check_interval_min) || 5);
     const loadBalanceIntervalMin = Math.max(1, Number(payload.load_balance_interval_min) || 5);
     const loadBalanceEnabled = payload.load_balance_enabled ? "1" : "0";
+    const systemProxyEnabled = payload.system_proxy_enabled ? "1" : "0";
 
     setSetting("speed_check_interval_min", String(speedCheck));
     setSetting("load_balance_enabled", loadBalanceEnabled);
     setSetting("load_balance_interval_min", String(loadBalanceIntervalMin));
+    setSetting("system_proxy_enabled", systemProxyEnabled);
 
     setupSpeedMonitor();
     setupLoadBalanceMonitor();
+    applySystemProxyIfEnabled();
     return { success: true };
   });
 
@@ -421,8 +453,10 @@ function setupIPC() {
   });
 
   ipcMain.handle("servers:testAll", async () => {
+    testAllCancelRequested = false;
     const servers = db.prepare("SELECT * FROM servers").all();
     for (let index = 0; index < servers.length; index += 1) {
+      if (testAllCancelRequested) break;
       const server = servers[index];
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("servers:testAllProgress", {
@@ -433,12 +467,18 @@ function setupIPC() {
         });
       }
       await testServer(server);
+      if (testAllCancelRequested) break;
       await testServerProxyCapability(server.id);
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("servers:testAllProgress", { done: true, total: servers.length });
+      mainWindow.webContents.send("servers:testAllProgress", { done: true, cancelled: testAllCancelRequested, total: servers.length });
     }
     applySpeedSortRanks();
+    return { success: true, cancelled: testAllCancelRequested };
+  });
+
+  ipcMain.handle("servers:testAllStop", () => {
+    testAllCancelRequested = true;
     return { success: true };
   });
 
@@ -449,6 +489,7 @@ function setupIPC() {
       await testConnectedProxySpeed(serverId);
       await testSocksLatency(serverId);
     }
+    await applySystemProxyIfEnabled(serverId);
     updateTrayForConnectedServer();
     return result;
   });
@@ -456,6 +497,7 @@ function setupIPC() {
   ipcMain.handle("ssh:disconnect", async (event, serverId) => {
     const result = disconnectSSH(serverId);
     sendNotification(result.success ? "Proxy disconnected" : "Disconnect failed", `Server #${serverId}`);
+    await applySystemProxyIfEnabled();
     updateTrayForConnectedServer();
     return result;
   });

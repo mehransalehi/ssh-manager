@@ -42,13 +42,17 @@
       <div class="flex flex-wrap gap-2 items-center">
         <button @click="showBulkModal = true" class="btn-primary"><i class="fa-solid fa-file-import mr-2"></i>Bulk import</button>
         <button @click="showSingleModal = true" class="btn-success"><i class="fa-solid fa-plus mr-2"></i>Add single server</button>
-        <button @click="testAll" :disabled="isTestingAll" class="btn-purple disabled:opacity-50 disabled:cursor-not-allowed">
-          <i class="fa-solid" :class="isTestingAll ? 'fa-spinner fa-spin mr-2' : 'fa-gauge-high mr-2'"></i>
+        <button @click="toggleTestAll" class="btn-purple">
+          <i class="fa-solid" :class="isTestingAll ? 'fa-stop mr-2' : 'fa-gauge-high mr-2'"></i>
           {{ testAllLabel }}
         </button>
         <label class="flex items-center gap-2 text-sm text-gray-200 px-3 py-2 rounded bg-gray-700">
           <input v-model="settings.load_balance_enabled" type="checkbox" class="accent-green-500" @change="saveSettings" />
           <span>Auto Load Balance (Pinned)</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-200 px-3 py-2 rounded bg-gray-700">
+          <input v-model="settings.system_proxy_enabled" type="checkbox" class="accent-green-500" @change="saveSettings" />
+          <span>Route App Traffic Through Tunnel</span>
         </label>
         <button @click="sortBySavedSpeed" class="btn-muted"><i class="fa-solid fa-arrow-down-wide-short mr-2"></i>Sort by Saved Speed</button>
       </div>
@@ -57,7 +61,7 @@
         Testing now: <span class="font-semibold">{{ currentTestingIp }}</span>
       </div>
 
-      <div v-for="s in servers" :key="s.id" :class="['server-card', s.status === 'CONNECTED' ? 'server-card-active' : '', s.is_pinned ? 'server-card-pinned' : '']">
+      <div v-for="s in servers" :key="s.id" :class="['server-card', s.status === 'CONNECTED' ? 'server-card-active' : '', s.is_pinned ? 'server-card-pinned' : '', currentTestingServerId === s.id ? 'server-card-testing' : '']">
         <div class="flex items-start justify-between gap-4">
           <div class="text-sm leading-5">
             <div class="font-semibold text-base flex items-center gap-2">
@@ -177,7 +181,7 @@ const optionalPort = ref(null)
 const showBulkModal = ref(false)
 const showSingleModal = ref(false)
 const showSettingsModal = ref(false)
-const settings = ref({ speed_check_interval_min: 5, load_balance_enabled: false, load_balance_interval_min: 5 })
+const settings = ref({ speed_check_interval_min: 5, load_balance_enabled: false, load_balance_interval_min: 5, system_proxy_enabled: false })
 const isTestingAll = ref(false)
 const currentTestingServerId = ref(null)
 const currentTestingIp = ref('')
@@ -188,7 +192,7 @@ const server = ref({ ip: '', optional_port: '', credential_id: '', port_profile_
 
 const testAllLabel = computed(() => {
   if (!isTestingAll.value) return 'Test All'
-  return currentTestingIp.value ? `Testing ${currentTestingIp.value}` : 'Testing...'
+  return currentTestingIp.value ? `Stop (${currentTestingIp.value})` : 'Stop Testing'
 })
 
 function tabClass(tab) {
@@ -234,7 +238,7 @@ async function deleteServer(id) { await window.api.invoke('servers:delete', id);
 async function togglePin(id) { await window.api.invoke('servers:togglePin', id); loadServers() }
 async function testOne(id) { await window.api.invoke('servers:testOne', id); loadServers() }
 
-async function testAll() {
+async function startTestAll() {
   if (isTestingAll.value) return
   isTestingAll.value = true
   currentTestingServerId.value = null
@@ -249,6 +253,18 @@ async function testAll() {
   }
 }
 
+async function stopTestAll() {
+  await window.api.invoke('servers:testAllStop')
+}
+
+async function toggleTestAll() {
+  if (isTestingAll.value) {
+    await stopTestAll()
+    return
+  }
+  startTestAll()
+}
+
 async function sortBySavedSpeed() { await window.api.invoke('servers:sortBySavedSpeed'); loadServers() }
 async function connect(id) { await window.api.invoke('ssh:connect', id); loadServers() }
 async function disconnect(id) { await window.api.invoke('ssh:disconnect', id); loadServers() }
@@ -258,7 +274,8 @@ async function saveSettings() {
   await window.api.invoke('settings:update', {
     speed_check_interval_min: Number(settings.value.speed_check_interval_min),
     load_balance_enabled: Boolean(settings.value.load_balance_enabled),
-    load_balance_interval_min: Number(settings.value.load_balance_interval_min)
+    load_balance_interval_min: Number(settings.value.load_balance_interval_min),
+    system_proxy_enabled: Boolean(settings.value.system_proxy_enabled)
   })
   if (showSettingsModal.value) showSettingsModal.value = false
 }

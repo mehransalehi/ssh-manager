@@ -43,7 +43,7 @@ body {
 }
 
 .server-card-active {
-  @apply border-green-400 shadow-[0_0_0_1px_rgba(74,222,128,0.6)] bg-gray-700/90;
+  @apply bg-green-300/25 shadow-[0_0_0_1px_rgba(134,239,172,0.35)] transition-all duration-500;
 }
 
 .icon-btn {
@@ -58,7 +58,24 @@ body {
   @apply w-[760px] max-w-[95vw] bg-gray-800 border border-gray-600 rounded-xl p-4;
 }
 
-
 .server-card-pinned {
   @apply border-amber-400/80;
+}
+
+
+.server-card-testing {
+  animation: testingPulse 0.95s ease-in-out infinite;
+}
+
+@keyframes testingPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(192, 132, 252, 0.35);
+    background-color: rgba(168, 85, 247, 0.12);
+  }
+
+  50% {
+    box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.75);
+    background-color: rgba(192, 132, 252, 0.25);
+  }
 }

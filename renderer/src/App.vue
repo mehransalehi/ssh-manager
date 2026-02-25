@@ -42,8 +42,19 @@
       <div class="flex flex-wrap gap-2 items-center">
         <button @click="showBulkModal = true" class="btn-primary"><i class="fa-solid fa-file-import mr-2"></i>Bulk import</button>
         <button @click="showSingleModal = true" class="btn-success"><i class="fa-solid fa-plus mr-2"></i>Add single server</button>
-        <button @click="testAll" class="btn-purple"><i class="fa-solid fa-gauge-high mr-2"></i>Test All</button>
+        <button @click="testAll" :disabled="isTestingAll" class="btn-purple disabled:opacity-50 disabled:cursor-not-allowed">
+          <i class="fa-solid" :class="isTestingAll ? 'fa-spinner fa-spin mr-2' : 'fa-gauge-high mr-2'"></i>
+          {{ testAllLabel }}
+        </button>
+        <label class="flex items-center gap-2 text-sm text-gray-200 px-3 py-2 rounded bg-gray-700">
+          <input v-model="settings.load_balance_enabled" type="checkbox" class="accent-green-500" @change="saveSettings" />
+          <span>Auto Load Balance (Pinned)</span>
+        </label>
         <button @click="sortBySavedSpeed" class="btn-muted"><i class="fa-solid fa-arrow-down-wide-short mr-2"></i>Sort by Saved Speed</button>
+      </div>
+
+      <div v-if="isTestingAll && currentTestingIp" class="text-xs text-purple-300">
+        Testing now: <span class="font-semibold">{{ currentTestingIp }}</span>
       </div>
 
       <div v-for="s in servers" :key="s.id" :class="['server-card', s.status === 'CONNECTED' ? 'server-card-active' : '', s.is_pinned ? 'server-card-pinned' : '']">
@@ -53,6 +64,7 @@
               <span>{{ s.country_flag || '🏳️' }}</span>
               <span>{{ s.ip }}</span>
               <span v-if="s.is_pinned" class="text-yellow-400" title="Pinned"><i class="fa-solid fa-thumbtack"></i></span>
+              <span v-if="currentTestingServerId === s.id" class="text-purple-300 text-xs ml-2"><i class="fa-solid fa-spinner fa-spin mr-1"></i>testing</span>
             </div>
             <div class="text-gray-300 flex flex-wrap gap-3 mt-1">
               <span><i class="fa-solid fa-circle-info mr-1"></i>{{ s.status || '-' }}</span>
@@ -86,6 +98,11 @@
         <div class="space-y-2">
           <label class="text-sm text-gray-300">Connected proxy speed-check interval (minutes)</label>
           <input v-model="settings.speed_check_interval_min" type="number" min="1" class="input w-40" />
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-sm text-gray-300">Load balance interval (minutes)</label>
+          <input v-model="settings.load_balance_interval_min" type="number" min="1" class="input w-40" />
         </div>
 
         <div class="space-y-2">
@@ -147,7 +164,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 
 const activeTab = ref('servers')
 const credentials = ref([])
@@ -160,11 +177,19 @@ const optionalPort = ref(null)
 const showBulkModal = ref(false)
 const showSingleModal = ref(false)
 const showSettingsModal = ref(false)
-const settings = ref({ speed_check_interval_min: 5 })
+const settings = ref({ speed_check_interval_min: 5, load_balance_enabled: false, load_balance_interval_min: 5 })
+const isTestingAll = ref(false)
+const currentTestingServerId = ref(null)
+const currentTestingIp = ref('')
 
 const cred = ref({ label: '', username: '', password: '' })
 const profile = ref({ label: '', local_socks_port: '' })
 const server = ref({ ip: '', optional_port: '', credential_id: '', port_profile_id: '' })
+
+const testAllLabel = computed(() => {
+  if (!isTestingAll.value) return 'Test All'
+  return currentTestingIp.value ? `Testing ${currentTestingIp.value}` : 'Testing...'
+})
 
 function tabClass(tab) {
   return ['px-4 py-2 rounded-t text-sm', activeTab.value === tab ? 'bg-gray-700 text-white font-bold' : 'text-gray-400 hover:text-white']
@@ -208,7 +233,22 @@ async function addServer() {
 async function deleteServer(id) { await window.api.invoke('servers:delete', id); loadServers() }
 async function togglePin(id) { await window.api.invoke('servers:togglePin', id); loadServers() }
 async function testOne(id) { await window.api.invoke('servers:testOne', id); loadServers() }
-async function testAll() { await window.api.invoke('servers:testAll'); loadServers() }
+
+async function testAll() {
+  if (isTestingAll.value) return
+  isTestingAll.value = true
+  currentTestingServerId.value = null
+  currentTestingIp.value = ''
+  try {
+    await window.api.invoke('servers:testAll')
+    await loadServers()
+  } finally {
+    isTestingAll.value = false
+    currentTestingServerId.value = null
+    currentTestingIp.value = ''
+  }
+}
+
 async function sortBySavedSpeed() { await window.api.invoke('servers:sortBySavedSpeed'); loadServers() }
 async function connect(id) { await window.api.invoke('ssh:connect', id); loadServers() }
 async function disconnect(id) { await window.api.invoke('ssh:disconnect', id); loadServers() }
@@ -216,9 +256,11 @@ async function testSocks(id) { await window.api.invoke('ssh:testSocks', id); loa
 
 async function saveSettings() {
   await window.api.invoke('settings:update', {
-    speed_check_interval_min: Number(settings.value.speed_check_interval_min)
+    speed_check_interval_min: Number(settings.value.speed_check_interval_min),
+    load_balance_enabled: Boolean(settings.value.load_balance_enabled),
+    load_balance_interval_min: Number(settings.value.load_balance_interval_min)
   })
-  showSettingsModal.value = false
+  if (showSettingsModal.value) showSettingsModal.value = false
 }
 
 async function rebuildGeo() {
@@ -245,5 +287,15 @@ onMounted(() => {
   loadCredentials(); loadProfiles(); loadServers(); loadSettings()
   window.api.receive('servers:updated', () => loadServers())
   window.api.receive('ui:openSettings', () => { showSettingsModal.value = true })
+  window.api.receive('servers:testAllProgress', (payload) => {
+    if (payload?.done) {
+      currentTestingServerId.value = null
+      currentTestingIp.value = ''
+      return
+    }
+
+    currentTestingServerId.value = payload?.serverId || null
+    currentTestingIp.value = payload?.ip || ''
+  })
 })
 </script>
